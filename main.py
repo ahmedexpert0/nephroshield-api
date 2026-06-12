@@ -9,11 +9,22 @@ import pandas as pd
 import shap
 import json
 import os
+import logging
 import requests
-from openai import OpenAI
-from google import genai as google_genai
+
+OPENAI_IMPORT_ERROR = None
+
+try:
+    from openai import OpenAI
+except Exception as e:
+    OpenAI = None
+    OPENAI_IMPORT_ERROR = str(e)
+    print(f"OpenAI package not available: {e}")
 
 app = FastAPI(title="CKD XGBoost API with Real NVIDIA XAI")
+
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("nephroshield-api")
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,15 +42,30 @@ app.add_middleware(
 NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "")
 NVIDIA_BASE_URL = "https://health.api.nvidia.com/v1"
 
-# OpenAI/ChatGPT for rapport generation
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+# LLM configuration for personalized rapport generation
+# Default is Gemini first. Set LLM_PROVIDER=openai if you want OpenAI first.
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini").strip().lower()
 
-# OR Google Gemini (alternative)
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-gemini_client = None
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+openai_client = None
+if OPENAI_API_KEY and OpenAI is not None:
+    try:
+        openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        logger.info("OpenAI client configured")
+    except Exception as e:
+        logger.warning("OpenAI client could not be initialized: %s", e)
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash").strip()
+GEMINI_API_BASE_URL = os.environ.get(
+    "GEMINI_API_BASE_URL",
+    "https://generativelanguage.googleapis.com/v1beta",
+).rstrip("/")
+
 if GEMINI_API_KEY:
-    gemini_client = google_genai.Client(api_key=GEMINI_API_KEY)
+    logger.info("Gemini REST generation configured with model %s", GEMINI_MODEL_NAME)
+else:
+    logger.info("GEMINI_API_KEY not set; Gemini rapport generation disabled")
 
 # ============================================
 # LOAD YOUR EXISTING MODEL (Fallback)
@@ -279,21 +305,96 @@ def generate_llm_rapport(probability, shap_explanations, patient_data, patient_c
     Keep the tone supportive and empowering. Be specific - reference their actual values.
     """
     
-    
-    
-    # Fallback to Gemini
-    if gemini_client:
+    def _call_gemini():
+        if not GEMINI_API_KEY:
+            return None
+
         try:
-            response = gemini_client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=user_prompt
+            gemini_prompt = f"{system_prompt}\n\n{user_prompt}"
+            url = f"{GEMINI_API_BASE_URL}/models/{GEMINI_MODEL_NAME}:generateContent"
+            payload = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": gemini_prompt}],
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 1500,
+                },
+            }
+            response = requests.post(
+                url,
+                params={"key": GEMINI_API_KEY},
+                json=payload,
+                timeout=45,
             )
-            llm_rapport = response.text
-            structured = extract_structured_from_llm(llm_rapport, risk_score, top_risk_factors)
-            return structured
+
+            if response.status_code >= 400:
+                logger.warning("Gemini API HTTP %s: %s", response.status_code, response.text[:1000])
+                return None
+
+            data = response.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                logger.warning("Gemini returned no candidates: %s", data)
+                return None
+
+            parts = candidates[0].get("content", {}).get("parts", [])
+            llm_rapport = "\n".join(
+                part.get("text", "") for part in parts if isinstance(part, dict) and part.get("text")
+            ).strip()
+
+            if not llm_rapport:
+                logger.warning("Gemini returned an empty text response: %s", data)
+                return None
+
+            return extract_structured_from_llm(
+                llm_rapport,
+                risk_score,
+                top_risk_factors,
+                provider="gemini",
+                model_name=GEMINI_MODEL_NAME,
+            )
         except Exception as e:
-            print(f"Gemini API error: {e}")
-    
+            logger.warning("Gemini API error: %s", e)
+            return None
+
+    def _call_openai():
+        if not openai_client:
+            return None
+        try:
+            response = openai_client.chat.completions.create(
+                model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1500
+            )
+            llm_rapport = (response.choices[0].message.content or "").strip()
+            if not llm_rapport:
+                raise ValueError("OpenAI returned an empty text response")
+            return extract_structured_from_llm(
+                llm_rapport,
+                risk_score,
+                top_risk_factors,
+                provider="openai",
+                model_name=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+            )
+        except Exception as e:
+            logger.warning("OpenAI API error: %s", e)
+            return None
+
+    # Try the preferred provider first, then the other provider, then the template.
+    providers = [_call_openai, _call_gemini] if LLM_PROVIDER == "openai" else [_call_gemini, _call_openai]
+    for call_provider in providers:
+        structured = call_provider()
+        if structured is not None:
+            return structured
+
     # Ultimate fallback - template-based but still dynamic
     return generate_template_rapport(risk_score, top_risk_factors, top_protective_factors, patient_context)
 
@@ -323,7 +424,7 @@ def generate_abnormal_labs_summary(patient_data):
     
     return "\n".join(abnormal) if abnormal else "All key markers within normal ranges."
 
-def extract_structured_from_llm(llm_text, risk_score, top_factors):
+def extract_structured_from_llm(llm_text, risk_score, top_factors, provider="llm", model_name=None):
     """Extract structured data from LLM response"""
     # Determine risk category
     if risk_score >= 70:
@@ -365,7 +466,9 @@ def extract_structured_from_llm(llm_text, risk_score, top_factors):
             "Are there any medications I should avoid?",
             "How often should I repeat these tests?"
         ],
-        "llm_generated": True
+        "llm_generated": True,
+        "llm_provider": provider,
+        "llm_model": model_name
     }
 
 def generate_template_rapport(risk_score, top_risk_factors, top_protective_factors, patient_context):
@@ -424,7 +527,28 @@ def generate_template_rapport(risk_score, top_risk_factors, top_protective_facto
             "Do I need medication adjustments?",
             "When should I repeat these tests?"
         ],
-        "llm_generated": False
+        "llm_generated": False,
+        "llm_provider": "template",
+        "llm_model": None
+    }
+
+@app.get("/health")
+async def health_check():
+    """Simple deployment health check, including LLM readiness."""
+    return {
+        "status": "ok",
+        "model_loaded": xgb_model is not None,
+        "shap_enabled": shap_explainer is not None,
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "gemini_api_key_present": bool(GEMINI_API_KEY),
+        "gemini_method": "rest",
+        "gemini_model": GEMINI_MODEL_NAME,
+        "gemini_api_base_url": GEMINI_API_BASE_URL,
+        "openai_configured": openai_client is not None,
+        "openai_api_key_present": bool(OPENAI_API_KEY),
+        "openai_package_available": OpenAI is not None,
+        "openai_import_error": OPENAI_IMPORT_ERROR,
+        "llm_provider_preference": LLM_PROVIDER,
     }
 
 # ============================================
@@ -451,6 +575,9 @@ async def predict_ckd(payload: PredictionRequest):
         input_array = np.array([[float(p.get(f, 0)) for f in FEATURE_COLS]])
         
         # Get model prediction
+        if xgb_model is None:
+            raise HTTPException(status_code=503, detail="XGBoost model is not loaded")
+
         probabilities = xgb_model.predict_proba(input_array)[0]
         prob_ckd = float(probabilities[1])
         

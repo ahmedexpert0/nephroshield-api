@@ -11,7 +11,7 @@ import json
 import os
 import requests
 from openai import OpenAI
-import google.generativeai as genai
+from google import genai as google_genai
 
 app = FastAPI(title="CKD XGBoost API with Real NVIDIA XAI")
 
@@ -37,9 +37,9 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # OR Google Gemini (alternative)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+gemini_client = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-pro')
+    gemini_client = google_genai.Client(api_key=GEMINI_API_KEY)
 
 # ============================================
 # LOAD YOUR EXISTING MODEL (Fallback)
@@ -279,36 +279,20 @@ def generate_llm_rapport(probability, shap_explanations, patient_data, patient_c
     Keep the tone supportive and empowering. Be specific - reference their actual values.
     """
     
-    # Try OpenAI first
-    if openai_client:
-        try:
-            response = openai_client.chat.completions.create(
-                model="gpt-4-turbo-preview",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.7,
-                max_tokens=1500
-            )
-            llm_rapport = response.choices[0].message.content
-            
-            # Also extract structured data
-            structured = extract_structured_from_llm(llm_rapport, risk_score, top_risk_factors)
-            return structured
-            
-        except Exception as e:
-            print(f"OpenAI API error: {e}")
+    
     
     # Fallback to Gemini
-    if gemini_model:
-        try:
-            response = gemini_model.generate_content(user_prompt)
-            llm_rapport = response.text
-            structured = extract_structured_from_llm(llm_rapport, risk_score, top_risk_factors)
-            return structured
-        except Exception as e:
-            print(f"Gemini API error: {e}")
+    if gemini_client:
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=user_prompt
+        )
+        llm_rapport = response.text
+        structured = extract_structured_from_llm(llm_rapport, risk_score, top_risk_factors)
+        return structured
+    except Exception as e:
+        print(f"Gemini API error: {e}")
     
     # Ultimate fallback - template-based but still dynamic
     return generate_template_rapport(risk_score, top_risk_factors, top_protective_factors, patient_context)

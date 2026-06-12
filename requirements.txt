@@ -5,3 +5,4 @@ xgboost
 uvicorn
 scikit-learn
 joblib
+shap==0.42.1

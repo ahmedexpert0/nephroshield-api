@@ -283,16 +283,16 @@ def generate_llm_rapport(probability, shap_explanations, patient_data, patient_c
     
     # Fallback to Gemini
     if gemini_client:
-    try:
-        response = gemini_client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=user_prompt
-        )
-        llm_rapport = response.text
-        structured = extract_structured_from_llm(llm_rapport, risk_score, top_risk_factors)
-        return structured
-    except Exception as e:
-        print(f"Gemini API error: {e}")
+        try:
+            response = gemini_client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=user_prompt
+            )
+            llm_rapport = response.text
+            structured = extract_structured_from_llm(llm_rapport, risk_score, top_risk_factors)
+            return structured
+        except Exception as e:
+            print(f"Gemini API error: {e}")
     
     # Ultimate fallback - template-based but still dynamic
     return generate_template_rapport(risk_score, top_risk_factors, top_protective_factors, patient_context)

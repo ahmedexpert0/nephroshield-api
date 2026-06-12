@@ -63,7 +63,7 @@ GEMINI_API_BASE_URL = os.environ.get(
 ).rstrip("/")
 
 if GEMINI_API_KEY:
-    logger.info("Gemini REST generation configured with model %s", GEMINI_MODEL_NAME)
+    logger.info("Gemini REST generation configured with model %s", GEMINI_MODEL)
 else:
     logger.info("GEMINI_API_KEY not set; Gemini rapport generation disabled")
 
@@ -311,7 +311,7 @@ def generate_llm_rapport(probability, shap_explanations, patient_data, patient_c
 
         try:
             gemini_prompt = f"{system_prompt}\n\n{user_prompt}"
-            url = f"{GEMINI_API_BASE_URL}/models/{GEMINI_MODEL_NAME}:generateContent"
+            url = f"{GEMINI_API_BASE_URL}/models/{GEMINI_MODEL}:generateContent"
             payload = {
                 "contents": [
                     {
@@ -355,7 +355,7 @@ def generate_llm_rapport(probability, shap_explanations, patient_data, patient_c
                 risk_score,
                 top_risk_factors,
                 provider="gemini",
-                model_name=GEMINI_MODEL_NAME,
+                model_name=GEMINI_MODEL,
             )
         except Exception as e:
             logger.warning("Gemini API error: %s", e)
@@ -542,7 +542,7 @@ async def health_check():
         "gemini_configured": bool(GEMINI_API_KEY),
         "gemini_api_key_present": bool(GEMINI_API_KEY),
         "gemini_method": "rest",
-        "gemini_model": GEMINI_MODEL_NAME,
+        "gemini_model": GEMINI_MODEL,
         "gemini_api_base_url": GEMINI_API_BASE_URL,
         "openai_configured": openai_client is not None,
         "openai_api_key_present": bool(OPENAI_API_KEY),

@@ -6,3 +6,7 @@ uvicorn
 scikit-learn
 joblib
 shap==0.42.1
+requests
+pandas
+openai
+google-generativeai
